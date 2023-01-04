@@ -9,9 +9,11 @@ from tokenizers.models import WordPiece
 from torch.utils.data import Dataset, DataLoader
 from handler import DataHandler 
 from model import *
+from config import train_configs
 
 
 
+DEBUG            = True 
 MICRO_BATCH_SIZE = 32
 
 def train(
@@ -31,13 +33,13 @@ def train(
         n_encoder_blocks=12,
         mlp_expansion_factor=4,
         output_dims=None,
-        use_gpu=True
+        use_gpu=True,
+        loss_fn=T.nn.CrossEntropyLoss()
         ) -> None:
+    ## Ensure empty cache. Should be done by operating system + cuda but can't hurt.
     T.cuda.empty_cache()
 
-    loss_fn = T.nn.CrossEntropyLoss()
     device  = T.device('cuda:0' if use_gpu else 'cpu')
-
     handler = DataHandler(
             dataset_name='bookcorpus', 
             max_length=input_dims,
@@ -68,24 +70,18 @@ def train(
     progress_bar = tqdm(total=len(dataloader) * n_epochs)
 
     back_losses = []
-    for idx, (X, attention_mask, y, mask_mask) in enumerate(dataloader):
+    for idx, (X, attention_mask, y, mask_idxs) in enumerate(dataloader):
         X              = X.to(cramming_model.device)
         attention_mask = attention_mask.to(cramming_model.device)
         y              = y.to(cramming_model.device)
-        mask_mask      = mask_mask.to(cramming_model.device)
+        mask_idxs      = mask_idxs.to(cramming_model.device)
 
         with T.autocast(device_type='cuda', dtype=T.float16):
             out = cramming_model.forward(X, attention_mask)
-
-            y        = (mask_mask * y).flatten()
-            out      = (mask_mask.unsqueeze(dim=-1) * out).flatten(start_dim=0, end_dim=1)
-
-            loss_idxs = T.argwhere(y != 0)
-            out       = out[loss_idxs, :].squeeze()
-            _y        = T.zeros_like(out)
-            _y[:, y[loss_idxs]] = 1
+            out = out.flatten(start_dim=0, end_dim=-2)
+            out = out[mask_idxs]
             
-            loss = loss_fn(out, _y)
+            loss = loss_fn(out, y)
 
         T.nn.utils.clip_grad_norm_(cramming_model.parameters(), max_norm=2.0)
         grad_scaler.scale(loss).backward()
@@ -104,13 +100,14 @@ def train(
 
         if idx % 1000 == 0:
             cramming_model.save_model(model_file=model_file)
-            print(f'Preds: {out}\n\n', f'Largest pred_prob: {T.max(out, dim=1)}\n\n\n\n')
-            print(
-                    f'Original text: {handler.tokenizer.decode(T.argmax(_y, dim=1))}\n\n', 
-                    f'Original text: {handler.tokenizer.decode(X[0])}\n\n', 
-                    f'Predicted Text: {handler.tokenizer.decode(T.argmax(out, dim=1))}\n\n'
-                    )
-            sys.exit()
+
+            ## Prediction sample
+            if DEBUG:
+                print(
+                        f'Original text True:    {handler.tokenizer.decode(X[0])}\n\n', 
+                        f'Predicted Mask Tokens: {handler.tokenizer.decode(T.argmax(out[:128], dim=-1))}\n\n'
+                        f'Actual Mask text:      {handler.tokenizer.decode(T.argmax(y[:128], dim=-1))}\n\n', 
+                        )
 
         progress_bar.update(1)
         progress_bar.set_description(f'Running Loss: {np.mean(back_losses[-100:])}')
@@ -118,4 +115,4 @@ def train(
 
 
 if __name__ == '__main__':
-    train()
+    train(**train_configs['bert_base_no_bias_no_dropout'])

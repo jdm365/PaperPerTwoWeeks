@@ -11,8 +11,9 @@ def fused_gelu(x):
 
 
 class InputEmbedding(nn.Module):
-    ## Positional Embedding same as in `Attention is all you Need` paper.
-
+    '''
+    Learned word embedding + sinusodial positional embedding as in `Attention is all you Need` paper.
+    '''
     def __init__(
             self, 
             vocab_size,
@@ -182,6 +183,7 @@ class CrammingTransformer(nn.Module):
             ])
 
         self.classifier_head = nn.Sequential(
+                nn.LayerNorm(embed_dims),
                 nn.Linear(embed_dims, vocab_size, bias=has_bias),
                 nn.Softmax(dim=-1)
             )
