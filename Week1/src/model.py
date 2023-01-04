@@ -2,113 +2,215 @@ import torch as T
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import math
 
+@T.jit.script
+def fused_gelu(x):
+    with T.autocast(device_type='cuda', dtype=T.float16):
+        return x * 0.5 * (1.0 + T.erf(x / 1.41421))
 
 
 class InputEmbedding(nn.Module):
-    def __init__(self, input_dims=512, embed_dim=384) -> None:
-        super(InputEmbedding, self).__init__()
-        self.input_dims = input_dims
-        self.embed_dim  = embed_dim
+    ## Positional Embedding same as in `Attention is all you Need` paper.
 
+    def __init__(
+            self, 
+            vocab_size,
+            embed_dims=768, 
+            max_seq_length=512, 
+            dtype=T.float16, 
+            device=T.device('cpu')
+            ) -> None:
+        super(InputEmbedding, self).__init__()
+
+        self.input_emb = nn.Embedding(vocab_size, embed_dims)
+
+        self.embed_dims = embed_dims
+        encoding = T.zeros(max_seq_length, embed_dims, device=device)
+        position = T.arange(0, max_seq_length, dtype=dtype, device=device).unsqueeze(1)
+        inv_denom = T.exp(T.arange(0, embed_dims, 2, dtype=dtype, device=device) * (-math.log(10000.0) / embed_dims))
+        encoding[:, 0::2] = T.sin(position * inv_denom)
+        encoding[:, 1::2] = T.cos(position * inv_denom)
+
+        ## Add batch dimension.
+        encoding = encoding.unsqueeze(0)
+        ## Register as buffer (not parameter).
+        self.register_buffer("encoding", encoding, persistent=False)
+        self.to(device)
 
     def forward(self, X: T.tensor) -> T.tensor:
-        ## TODO
-        return
+        X = self.input_emb(X)
+        return X + self.encoding[:, :X.shape[1], :] 
 
+
+class SelfAttention(nn.Module):
+    def __init__(self, embed_dims=768, num_heads=8, has_bias=False) -> None:
+        super(SelfAttention, self).__init__()
+        
+        self.embed_dims = embed_dims
+        self.num_heads  = num_heads
+        self.head_dims  = embed_dims // num_heads
+
+        assert(self.head_dims * num_heads == embed_dims), "Embed dims needs to be divisible by heads"
+
+        ## Concat qkv into one matrix
+        self.qkv    = nn.Linear(embed_dims, 3 * embed_dims, bias=False)
+        self.fc_out = nn.Linear(embed_dims, embed_dims, bias=has_bias)
+
+
+    @staticmethod
+    def scaled_dot_product(query, key, value, attention_mask=None) -> T.tensor:
+        embed_dim = key.shape[-1]
+        attention_logits = T.matmul(query, key.transpose(-2, -1)) / math.sqrt(embed_dim)
+
+        if attention_mask is not None:
+            mask_broadcast = attention_mask.unsqueeze(dim=1).unsqueeze(dim=1)
+
+            ## Fill with fp16 min value
+            attention_logits = attention_logits.masked_fill(mask_broadcast == 0, -1e+4)
+        attention = F.softmax(attention_logits, dim=-1)
+        values = T.matmul(attention, value)
+        return values
+
+
+    def forward(self, X: T.tensor, attention_mask=None) -> T.tensor:
+        batch_size, seq_length, _ = X.shape
+
+        qkv = self.qkv(X)
+
+        # Split embedding into self.heads pieces
+        qkv = qkv.reshape(batch_size, seq_length, self.num_heads, 3 * self.head_dims)
+
+        ## (batch, heads, seq_length, dims)
+        qkv = qkv.permute(0, 2, 1, 3)
+        queries, keys, values = qkv.chunk(3, dim=-1)
+
+        out = self.scaled_dot_product(queries, keys, values, attention_mask=attention_mask)
+
+        ## Restore dims -> (batch, seq_length, heads, dims)
+        out = out.permute(0, 2, 1, 3)
+        out = out.reshape(batch_size, seq_length, self.embed_dims)
+
+        X = self.fc_out(out)
+        return X
 
 
 class Encoder(nn.Module):
     def __init__(
-            self, 
-            embed_dim=384, 
-            qkv_dim=64, 
-            num_heads=8, 
+            self,
+            embed_dims=384,
+            num_heads=8,
             has_bias=False,
-            activation=nn.GELU,
             dropout_rate=0.0,
-            mlp_hidden_dims=None
+            mlp_hidden_dims=None,
+            mlp_expansion_factor=4
             ) -> None:
         super(Encoder, self).__init__()
-        self.embed_dim  = embed_dim
-        self.qkv_dim    = qkv_dim
-        self.num_heads  = num_heads
+
         if mlp_hidden_dims is None:
-            mlp_hidden_dims = 4 * emb_dim
+            mlp_hidden_dims = mlp_expansion_factor * embed_dims
 
+        self.attention_norm = nn.LayerNorm(embed_dims)
+        self.attention_block = SelfAttention(
+                embed_dims=embed_dims,
+                num_heads=num_heads,
+                has_bias=has_bias
+                )
 
-        self.attention_block = nn.Sequential(
-                nn.MultiHeadedAttention(
-                    embed_dim=embed_dim,
-                    num_heads=num_heads
-                    dropout=droupout_rate,
-                    bias=has_bias,
-                    batch_first=True
-                    ),
-                nn.LayerNorm(emb_dim)
-                )
-        self.mlp_block = nn.Sequential(
-                nn.Linear(emb_dim, mlp_hidden_dims, bias=has_bias),
-                activation,
-                nn.Linear(mlp_hidden_dims, mlp_hidden_dims, bias=has_bias),
-                activation,
-                nn.LayerNorm(emb_dim)
-                )
+        self.mlp_norm = nn.LayerNorm(embed_dims)
+
+        self.fc1      = nn.Linear(embed_dims, mlp_hidden_dims, bias=has_bias)
+        self.dropout1 = nn.Dropout1d(p=dropout_rate)
+        self.fc2      = nn.Linear(mlp_hidden_dims, embed_dims, bias=has_bias)
+        self.dropout2 = nn.Dropout1d(p=dropout_rate)
         
 
-    def forward(self, X: T.tensor) -> T.tensor:
-        X = X + self.attention_block(X)
-        X = X + self.mlp_block(X)
-        return X
+    def forward(self, X: T.tensor, attention_mask: T.tensor = None) -> (T.tensor, T.tensor):
+        '''
+        ## Post-norm
+        attention_output = self.attention_block(X, attention_mask)
+        X = self.attention_norm(attention_output + X)
+        mlp_output = self.mlp_block(X)
+        X = self.mlp_norm(mlp_output)
+        '''
+
+        ## Pre-norm
+        X = self.attention_norm(X)
+        attention_output = self.attention_block(X, attention_mask)
+        X = self.mlp_norm(attention_output)
+
+        X = fused_gelu(self.fc1(X))
+        X = self.dropout1(X)
+        X = fused_gelu(self.fc2(X))
+        X = self.dropout2(X)
+        return X, attention_mask
 
 
 class CrammingTransformer(nn.Module):
     def __init__(
             self,
-            input_dims=512,
-            embed_dim=384, 
-            qkv_dim=64, 
+            vocab_size,
+            input_dims,
+            embed_dims=384, 
             num_heads=8, 
             has_bias=False,
-            activation=nn.GELU,
             dropout_rate=0.0,
             mlp_hidden_dims=None,
             n_encoder_blocks=8,
-            output_dims=None,
-            lr=1e-4
+            mlp_expansion_factor=4,
+            lr=5e-4,
+            device=T.device('cuda:0' if T.cuda.is_available() else 'cpu')
             ) -> None:
         super(CrammingTransformer, self).__init__()
+        self.embed_dims = embed_dims
 
-        self.model = [
-                InputEmbedding(
-                    input_dims=input_dims,
-                    embed_dims=embed_dims
-                    )]
-        self.model += [
+        self.input_embedding = InputEmbedding(
+                vocab_size=vocab_size,
+                embed_dims=embed_dims,
+                max_seq_length=input_dims,
+                device=device
+                )
+        self.model = nn.ModuleList([
             Encoder(
-                embed_dim=embed_dim,
-                qkv_dim=qkv_dim,
+                embed_dims=embed_dims,
                 num_heads=num_heads,
                 has_bias=has_bias,
-                activation=activation,
                 dropout_rate=dropout_rate,
-                mlp_hidden_dims=mlp_hidden_dims
-                ) for _ in n_encoder_blocks
-            ]
-        self.model += [
-                nn.Linear(embed_dims, output_dims, bias=has_bias),
-                nn.Softmax()
-                ]
+                mlp_hidden_dims=mlp_hidden_dims,
+                mlp_expansion_factor=mlp_expansion_factor
+                ) for _ in range(n_encoder_blocks)
+            ])
 
-        self.model = nn.Sequential(nn.ModuleList(self.model))
+        self.classifier_head = nn.Sequential(
+                nn.Linear(embed_dims, vocab_size, bias=has_bias),
+                nn.Softmax(dim=-1)
+            )
 
-        self.lr = lr
-        self.optimizer = optim.Adam(self.parameters(), lr=lr)
-        self.device = T.device('cuda:0' if T.cuda.is_available else 'cpu')
+        self.optimizer = optim.Adam(self.parameters(), lr=lr, weight_decay=0.01)
+        self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                self.optimizer, 
+                T_0=10000
+                )
+
+        self.device = device
         self.to(self.device)
 
 
-    def forward(self, X: T.tensor) -> T.tensor:
-        return self.model(X)
+    def forward(self, X: T.tensor, attention_mask: T.tensor = None) -> T.tensor:
+        X = self.input_embedding(X)
+        for encoder_block in self.model:
+            X, _ = encoder_block(X, attention_mask)
+        return self.classifier_head(X)
 
-        
+
+    def save_model(self, model_file: str) -> None:
+        print(f'...Saving Model to {model_file}...')
+        T.save(self.state_dict(), model_file)
+        T.save(self.optimizer.state_dict(), f'{model_file[:-3]}_optimizer.pt')
+
+
+    def load_model(self, model_file: str, load_optimizer=False) -> None:
+        print(f'...Loading Model from {model_file}...')
+        self.load_state_dict(T.load(model_file))
+        if load_optimizer:
+            self.optimizer.load_state_dict(T.load(f'{model_file[:-3]}_optimizer.pt'))
