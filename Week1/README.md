@@ -1,6 +1,6 @@
 <h1>CRAMMING: TRAINING A LANGUAGE MODEL ON A SINGLE GPU IN ONE DAY</h1>
 
-<h3><u>Authors</u></h3>
+<h3>Authors</h3>
 
 Jonas Geiping
 University of Maryland, College Park
@@ -11,7 +11,7 @@ University of Maryland, College Park
 tomg@umd.edu
 
 
-<h3><u>Abstract</u></h3>
+<h3>Abstract</h3>
 Recent trends in language modeling have focused on increasing performance
 through scaling, and have resulted in an environment where training language
 models is out of reach for most researchers and practitioners. While most in the
@@ -29,6 +29,8 @@ scaling laws, we categorize a range of recent improvements to training and
 architecture and discuss their merit and practical applicability (or lack thereof)
 for the limited compute setting.
 
+<h3>arxiv link -> https://arxiv.org/abs/2212.14034</h3>
+<h3>Official code -> https://github.com/JonasGeiping/cramming</h3>
 
-<h4><u>Additional Notes</u><h4>
+<h3>Additional Notes<h3>
 
