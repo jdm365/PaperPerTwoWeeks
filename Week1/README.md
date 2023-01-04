@@ -29,8 +29,8 @@ scaling laws, we categorize a range of recent improvements to training and
 architecture and discuss their merit and practical applicability (or lack thereof)
 for the limited compute setting.
 
-<h3>arxiv link -> https://arxiv.org/abs/2212.14034</h3>
-<h3>Official code -> https://github.com/JonasGeiping/cramming</h3>
+<h5>arxiv link -> https://arxiv.org/abs/2212.14034</h5>
+<h5>Official code -> https://github.com/JonasGeiping/cramming</h5>
 
 <h3>Additional Notes<h3>
 
