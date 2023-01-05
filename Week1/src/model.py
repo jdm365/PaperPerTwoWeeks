@@ -20,7 +20,7 @@ class InputEmbedding(nn.Module):
             embed_dims=768, 
             max_seq_length=512, 
             dtype=T.float16, 
-            device=T.device('cpu')
+            device=T.device('cuda:0' if T.cuda.is_available() else 'cpu')
             ) -> None:
         super(InputEmbedding, self).__init__()
 
@@ -45,7 +45,7 @@ class InputEmbedding(nn.Module):
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, embed_dims=768, num_heads=8, has_bias=False) -> None:
+    def __init__(self, embed_dims=768, num_heads=8, has_bias=False, dropout_rate=0.0) -> None:
         super(SelfAttention, self).__init__()
         
         self.embed_dims = embed_dims
@@ -55,20 +55,22 @@ class SelfAttention(nn.Module):
         assert(self.head_dims * num_heads == embed_dims), "Embed dims needs to be divisible by heads"
 
         ## Concat qkv into one matrix
-        self.qkv    = nn.Linear(embed_dims, 3 * embed_dims, bias=False)
-        self.fc_out = nn.Linear(embed_dims, embed_dims, bias=has_bias)
+        self.qkv     = nn.Linear(embed_dims, 3 * embed_dims, bias=False)
+        self.dropout = nn.Dropout1d(p=dropout_rate)
+        self.fc_out  = nn.Linear(embed_dims, embed_dims, bias=has_bias)
 
 
     @staticmethod
     def scaled_dot_product(query, key, value, attention_mask=None) -> T.tensor:
-        embed_dim = key.shape[-1]
-        attention_logits = T.matmul(query, key.transpose(-2, -1)) / math.sqrt(embed_dim)
+        embed_dims = key.shape[-1]
+        attention_logits = T.matmul(query, key.transpose(-2, -1)) / math.sqrt(embed_dims)
 
         if attention_mask is not None:
             mask_broadcast = attention_mask.unsqueeze(dim=1).unsqueeze(dim=1)
 
             ## Fill with fp16 min value
             attention_logits = attention_logits.masked_fill(mask_broadcast == 0, -1e+4)
+
         attention = F.softmax(attention_logits, dim=-1)
         values = T.matmul(attention, value)
         return values
@@ -92,7 +94,8 @@ class SelfAttention(nn.Module):
         out = out.permute(0, 2, 1, 3)
         out = out.reshape(batch_size, seq_length, self.embed_dims)
 
-        X = self.fc_out(out)
+        X = self.dropout(out)
+        X = self.fc_out(X)
         return X
 
 
@@ -103,19 +106,18 @@ class Encoder(nn.Module):
             num_heads=8,
             has_bias=False,
             dropout_rate=0.0,
-            mlp_hidden_dims=None,
             mlp_expansion_factor=4
             ) -> None:
         super(Encoder, self).__init__()
 
-        if mlp_hidden_dims is None:
-            mlp_hidden_dims = mlp_expansion_factor * embed_dims
+        mlp_hidden_dims = mlp_expansion_factor * embed_dims
 
         self.attention_norm = nn.LayerNorm(embed_dims)
         self.attention_block = SelfAttention(
                 embed_dims=embed_dims,
                 num_heads=num_heads,
-                has_bias=has_bias
+                has_bias=has_bias,
+                dropout_rate=dropout_rate
                 )
 
         self.mlp_norm = nn.LayerNorm(embed_dims)
@@ -127,23 +129,25 @@ class Encoder(nn.Module):
         
 
     def forward(self, X: T.tensor, attention_mask: T.tensor = None) -> (T.tensor, T.tensor):
-        '''
         ## Post-norm
-        attention_output = self.attention_block(X, attention_mask)
-        X = self.attention_norm(attention_output + X)
-        mlp_output = self.mlp_block(X)
-        X = self.mlp_norm(mlp_output)
+        _X = self.attention_block(X, attention_mask)
+        X  = self.attention_norm(X + _X)
+        
+        _X = fused_gelu(self.dropout1(self.fc1(X)))
+        _X = self.dropout2(self.fc2(_X))
+        X  = self.mlp_norm(X + _X)
+
         '''
-
         ## Pre-norm
-        X = self.attention_norm(X)
-        attention_output = self.attention_block(X, attention_mask)
-        X = self.mlp_norm(attention_output)
-
-        X = fused_gelu(self.fc1(X))
-        X = self.dropout1(X)
-        X = fused_gelu(self.fc2(X))
-        X = self.dropout2(X)
+        _X = self.attention_norm(X)
+        X  = X + self.attention_block(_X, attention_mask)
+        
+        _X = self.mlp_norm(X)
+        _X = fused_gelu(self.fc1(_X))
+        _X = self.dropout1(_X)
+        _X = fused_gelu(self.fc2(_X))
+        X  = X + self.dropout2(_X)
+        '''
         return X, attention_mask
 
 
@@ -151,12 +155,11 @@ class CrammingTransformer(nn.Module):
     def __init__(
             self,
             vocab_size,
-            input_dims,
+            seq_length,
             embed_dims=384, 
             num_heads=8, 
             has_bias=False,
             dropout_rate=0.0,
-            mlp_hidden_dims=None,
             n_encoder_blocks=8,
             mlp_expansion_factor=4,
             lr=5e-4,
@@ -168,7 +171,7 @@ class CrammingTransformer(nn.Module):
         self.input_embedding = InputEmbedding(
                 vocab_size=vocab_size,
                 embed_dims=embed_dims,
-                max_seq_length=input_dims,
+                max_seq_length=seq_length,
                 device=device
                 )
         self.model = nn.ModuleList([
@@ -177,22 +180,29 @@ class CrammingTransformer(nn.Module):
                 num_heads=num_heads,
                 has_bias=has_bias,
                 dropout_rate=dropout_rate,
-                mlp_hidden_dims=mlp_hidden_dims,
                 mlp_expansion_factor=mlp_expansion_factor
                 ) for _ in range(n_encoder_blocks)
             ])
 
         self.classifier_head = nn.Sequential(
                 nn.LayerNorm(embed_dims),
-                nn.Linear(embed_dims, vocab_size, bias=has_bias),
-                nn.Softmax(dim=-1)
+                nn.Linear(embed_dims, vocab_size, bias=has_bias)
+                #nn.Softmax(dim=-1)
             )
 
-        self.optimizer = optim.Adam(self.parameters(), lr=lr, weight_decay=0.01)
+        self.optimizer = optim.Adam(
+                self.parameters(), 
+                lr=lr, 
+                weight_decay=0.01, 
+                eps=1e-12,
+                betas=(0.9, 0.98)
+                )
+        '''
         self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
                 self.optimizer, 
                 T_0=10000
                 )
+        '''
 
         self.device = device
         self.to(self.device)
@@ -201,7 +211,7 @@ class CrammingTransformer(nn.Module):
     def forward(self, X: T.tensor, attention_mask: T.tensor = None) -> T.tensor:
         X = self.input_embedding(X)
         for encoder_block in self.model:
-            X, _ = encoder_block(X, attention_mask)
+            X, attention_mask = encoder_block(X, attention_mask)
         return self.classifier_head(X)
 
 

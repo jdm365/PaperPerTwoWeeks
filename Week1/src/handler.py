@@ -44,7 +44,7 @@ class DataHandler:
         ## Concatenate dataset to be of max_length.
         self.condense_dataset()
 
-        self.tokenizer   = BertTokenizer.from_pretrained('bert-base-cased')
+        self.tokenizer   = BertTokenizer.from_pretrained('bert-base-cased', cls_token='')
         self.vocab_size  = len(self.tokenizer)
         self.device      = device
         self.dtype       = dtype
@@ -112,6 +112,7 @@ class CustomCollator:
 
         self.pad_token_id   = self.tokenizer(['[PAD]'], add_special_tokens=False)['input_ids'][0][0]
         self.mask_token_id  = self.tokenizer(['[MASK]'], add_special_tokens=False)['input_ids'][0][0]
+        self.sep_token_id   = self.tokenizer(['[SEP]'], add_special_tokens=False)['input_ids'][0][0]
 
 
     def __call__(self, batch) -> (T.tensor, T.tensor):
@@ -142,13 +143,16 @@ class CustomCollator:
         original_ids    = token_ids.clone().flatten()
         token_idxs      = T.arange(0, original_ids.shape[0])
 
+        '''
         original_labels = T.zeros((token_ids.shape[0] * token_ids.shape[1], self.tokenizer.vocab_size))
         original_labels[token_idxs, original_ids] = 1
+        '''
 
         ## mask (i.e. (1, 0, 0, 1, ...)) where mask tokens (i.e. '[MASK]') are applied.
         mask_mask = T.zeros_like(attention_mask)
-        for idx, batch in enumerate(attention_mask):
-            nonpad_idxs = T.argwhere(batch).squeeze()
+        ##for idx, batch in enumerate(attention_mask):
+        for idx, batch in enumerate(token_ids):
+            nonpad_idxs = T.argwhere(batch != self.sep_token_id).squeeze()
             mask_idxs = np.random.choice(
                     nonpad_idxs, 
                     size=int(nonpad_idxs.shape[0] * self.mlm_prob), 
@@ -159,8 +163,8 @@ class CustomCollator:
 
         mask_idxs = T.argwhere(mask_mask.flatten() != 0).squeeze()
 
-        original_labels = original_labels[mask_idxs].type(T.float16)
-        return token_ids, attention_mask, original_labels, mask_idxs 
+        #original_ids[mask_idxs] = -100
+        return token_ids, attention_mask, original_ids[mask_idxs], mask_idxs 
 
 
 
