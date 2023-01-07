@@ -1,4 +1,5 @@
 import torch as T
+import torch.nn.functional as F
 from torch.cuda.amp import GradScaler
 import numpy as np
 from tqdm import tqdm
@@ -10,13 +11,16 @@ from tokenizers.models import WordPiece
 from torch.utils.data import Dataset, DataLoader
 from handler import DataHandler 
 from model import *
+from test_model import HuggingFaceBertWrapper
 from config import train_configs
 
 
-
-SHOW_PROGRESS    = True
-DEBUG            = False 
-MICRO_BATCH_SIZE = 32
+CONTINUE_FROM_CHECKPOINT     = True
+TEST_WITH_HUGGING_FACE_MODEL = False 
+LOSS_RUNNING_MEAN_LENGTH     = 500
+SHOW_PROGRESS                = True
+DEBUG                        = False 
+MICRO_BATCH_SIZE             = 32
 
 def train(
         n_epochs=1,
@@ -34,7 +38,7 @@ def train(
         n_encoder_blocks=12,
         mlp_expansion_factor=4,
         use_gpu=True,
-        loss_fn=T.nn.CrossEntropyLoss()
+        loss_fn=T.nn.CrossEntropyLoss(ignore_index=-100)
         ) -> None:
     ## Ensure empty cache. Should be done by operating system + cuda but can't hurt.
     T.cuda.empty_cache()
@@ -51,18 +55,32 @@ def train(
     ## when actual `batch_size` inputs are processed.
     dataloader = handler.get_dataloader(batch_size=MICRO_BATCH_SIZE)
 
-    cramming_model = CrammingTransformer(
-            vocab_size=handler.tokenizer.vocab_size,
-            seq_length=seq_length,
-            embed_dims=embed_dims,
-            num_heads=num_heads, 
-            has_bias=has_bias,
-            dropout_rate=dropout_rate,
-            n_encoder_blocks=n_encoder_blocks,
-            mlp_expansion_factor=mlp_expansion_factor,
+    if TEST_WITH_HUGGING_FACE_MODEL:
+        ## Use Huggingface Bert model for MaskedLM to compare to custom model.
+        cramming_model = HuggingFaceBertWrapper(
+            vocab_size=handler.tokenizer.vocab_size, 
+            hidden_size=embed_dims, 
+            num_hidden_layers=n_encoder_blocks,
+            hidden_dropout_prob=dropout_rate,
             lr=lr,
             device=device
             )
+    else:
+        cramming_model = CrammingTransformer(
+                vocab_size=handler.tokenizer.vocab_size,
+                seq_length=seq_length,
+                embed_dims=embed_dims,
+                num_heads=num_heads, 
+                has_bias=has_bias,
+                dropout_rate=dropout_rate,
+                n_encoder_blocks=n_encoder_blocks,
+                mlp_expansion_factor=mlp_expansion_factor,
+                lr=lr,
+                device=device
+                )
+        if CONTINUE_FROM_CHECKPOINT:
+            cramming_model.load_model(model_file=model_file, load_optimzer=True)
+
 
     progress_bar = tqdm(total=len(dataloader) * n_epochs)
 
@@ -80,8 +98,6 @@ def train(
                 
                 loss = loss_fn(out, y)
 
-            #print([(x.item(), y.item()) for x, y in zip(X[0], y[:128])])
-            #sys.exit()
 
             loss.backward()
 
@@ -102,7 +118,7 @@ def train(
                 
             losses.append(loss.item())
 
-            if len(losses) == 500:
+            if len(losses) == LOSS_RUNNING_MEAN_LENGTH:
                 losses.pop(0)
 
             if idx % 1000 == 0:
@@ -116,12 +132,12 @@ def train(
                             #f'Original Text (Masked):   {handler.tokenizer.decode(X.flatten()[:128])}\n\n', 
                             #f'Predicted Text:           {handler.tokenizer.decode(T.argmax(out[:128], dim=-1))}\n\n',
                             f'Original Masked Tokens:    {handler.tokenizer.decode(y[idxs])}\n\n',
-                            f'Predicted Masked Tokens:   {handler.tokenizer.decode(T.argmax(out[:128], dim=-1)[idxs])}\n\n'
+                            f'Predicted Masked Tokens:   {handler.tokenizer.decode(T.argmax(F.softmax(out[:128], dim=-1), dim=-1)[idxs])}\n\n'
                             )
 
 
             progress_bar.update(1)
-            progress_bar.set_description(f'Running Loss: {np.mean(losses[-100:])}')
+            progress_bar.set_description(f'Running Loss: {np.mean(losses[-LOSS_RUNNING_MEAN_LENGTH:])}')
 
 
 

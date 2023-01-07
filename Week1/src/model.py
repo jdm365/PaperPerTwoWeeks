@@ -230,10 +230,11 @@ class CrammingTransformer(nn.Module):
         print(f'...Saving Model to {model_file}...')
         T.save(self.state_dict(), model_file)
         T.save(self.optimizer.state_dict(), f'{model_file[:-3]}_optimizer.pt')
+        T.save(self.scheduler.state_dict(), f'{model_file[:-3]}_scheduler.pt')
 
 
-    def load_model(self, model_file: str, load_optimizer=False) -> None:
+    def load_model(self, model_file: str) -> None:
         print(f'...Loading Model from {model_file}...')
         self.load_state_dict(T.load(model_file))
-        if load_optimizer:
-            self.optimizer.load_state_dict(T.load(f'{model_file[:-3]}_optimizer.pt'))
+        self.optimizer.load_state_dict(T.load(f'{model_file[:-3]}_optimizer.pt'))
+        self.scheduler.load_state_dict(T.load(f'{model_file[:-3]}_scheduler.pt'))

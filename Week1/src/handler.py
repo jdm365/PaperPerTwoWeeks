@@ -162,9 +162,9 @@ class CustomCollator:
             mask_mask[idx, mask_idxs] = 1
             token_ids[idx, mask_idxs] = self.mask_token_id
 
-        mask_idxs = T.argwhere(mask_mask.flatten() != 0).squeeze()
+        non_mask_idxs = T.argwhere(mask_mask.flatten() == 0).squeeze()
 
-        original_ids[mask_idxs] = -100
+        original_ids[non_mask_idxs] = -100
         return token_ids, attention_mask, original_ids
 
 
