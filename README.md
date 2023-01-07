@@ -1,2 +1,2 @@
-# PaperPerWeek
-Try to implement a arxiv paper in code every week.
+# PaperPerTwoWeeks
+Try to implement a arxiv paper in code every two weeks.
