@@ -45,10 +45,11 @@ class DataHandler:
         self.condense_dataset()
 
         self.tokenizer   = BertTokenizer.from_pretrained(
-                'bert-base-cased', 
+                'bert-based-uncased', 
                 cls_token=''
                 )
         self.vocab_size  = len(self.tokenizer)
+        print(self.vocab_size)
         self.device      = device
         self.dtype       = dtype
 
@@ -144,6 +145,8 @@ class CustomCollator:
 
 
     def mask_inputs(self, token_ids, attention_mask) -> (T.tensor, T.tensor, T.tensor, T.tensor):
+        ## Bechmarked. Does not actually slow down execution. 
+        ## GPU forward/backward pass is limiting factor w/ 4 workers and prefetch_factor=2.
         original_ids = token_ids.clone().flatten()
 
         special_token_ids = [self.pad_token_id, self.sep_token_id, self.unk_token_id]

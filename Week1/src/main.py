@@ -15,7 +15,7 @@ from test_model import HuggingFaceBertWrapper
 from config import train_configs
 
 
-CONTINUE_FROM_CHECKPOINT     = True
+CONTINUE_FROM_CHECKPOINT     = False 
 TEST_WITH_HUGGING_FACE_MODEL = False 
 LOSS_RUNNING_MEAN_LENGTH     = 500
 SHOW_PROGRESS                = True
@@ -79,7 +79,7 @@ def train(
                 device=device
                 )
         if CONTINUE_FROM_CHECKPOINT:
-            cramming_model.load_model(model_file=model_file, load_optimzer=True)
+            cramming_model.load_model(model_file=model_file)
 
 
     progress_bar = tqdm(total=len(dataloader) * n_epochs)
@@ -93,7 +93,6 @@ def train(
 
             with T.cuda.amp.autocast():
                 out = cramming_model.forward(X, None)
-                #out = out.flatten(start_dim=0, end_dim=-2)
                 out = out.view(-1, handler.tokenizer.vocab_size)
                 
                 loss = loss_fn(out, y)
@@ -117,11 +116,10 @@ def train(
                     param.grad = None
                 
             losses.append(loss.item())
-
             if len(losses) == LOSS_RUNNING_MEAN_LENGTH:
                 losses.pop(0)
 
-            if idx % 1000 == 0:
+            if idx % 5000 == 0:
                 print(f'Tokens ingested: {idx * 128 * MICRO_BATCH_SIZE // 1e6}M')
                 cramming_model.save_model(model_file=model_file)
 
