@@ -45,7 +45,7 @@ class DataHandler:
         self.condense_dataset()
 
         self.tokenizer   = BertTokenizer.from_pretrained(
-                'bert-based-uncased', 
+                'bert-base-uncased', 
                 cls_token=''
                 )
         self.vocab_size  = len(self.tokenizer)
