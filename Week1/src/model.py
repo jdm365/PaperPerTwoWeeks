@@ -24,7 +24,8 @@ class InputEmbedding(nn.Module):
             ) -> None:
         super(InputEmbedding, self).__init__()
 
-        self.input_emb = nn.Embedding(vocab_size, embed_dims)
+        self.input_emb  = nn.Embedding(vocab_size, embed_dims)
+        self.embed_norm = nn.LayerNorm(embed_dims)
 
         self.embed_dims = embed_dims
         encoding = T.zeros(max_seq_length, embed_dims, device=device)
@@ -41,7 +42,8 @@ class InputEmbedding(nn.Module):
 
     def forward(self, X: T.tensor) -> T.tensor:
         X = self.input_emb(X)
-        return X + self.encoding[:, :X.shape[1], :] 
+        X = X + self.encoding 
+        return self.embed_norm(X)
 
 
 class SelfAttention(nn.Module):
@@ -72,7 +74,7 @@ class SelfAttention(nn.Module):
             attention_logits = attention_logits.masked_fill(mask_broadcast == 0, -1e+4)
 
         attention = F.softmax(attention_logits, dim=-1)
-        values = T.matmul(attention, value)
+        values    = T.matmul(attention, value)
         return values
 
 
@@ -93,8 +95,8 @@ class SelfAttention(nn.Module):
         ## Restore dims -> (batch, seq_length, heads, dims)
         out = out.permute(0, 2, 1, 3)
         out = out.reshape(batch_size, seq_length, self.embed_dims)
-
         X = self.dropout(out)
+
         X = self.fc_out(X)
         return X
 
@@ -126,9 +128,13 @@ class Encoder(nn.Module):
         self.dropout1 = nn.Dropout1d(p=dropout_rate)
         self.fc2      = nn.Linear(mlp_hidden_dims, embed_dims, bias=has_bias)
         self.dropout2 = nn.Dropout1d(p=dropout_rate)
+
+        ## Skeptical
+        self.final_norm = nn.LayerNorm(embed_dims)
         
 
     def forward(self, X: T.tensor, attention_mask: T.tensor = None) -> (T.tensor, T.tensor):
+        '''
         ## Post-norm
         _X = self.attention_block(X, attention_mask)
         X  = self.attention_norm(X + _X)
@@ -136,18 +142,21 @@ class Encoder(nn.Module):
         _X = fused_gelu(self.dropout1(self.fc1(X)))
         _X = self.dropout2(self.fc2(_X))
         X  = self.mlp_norm(X + _X)
-
         '''
+
         ## Pre-norm
         _X = self.attention_norm(X)
+
         X  = X + self.attention_block(_X, attention_mask)
         
         _X = self.mlp_norm(X)
+
         _X = fused_gelu(self.fc1(_X))
         _X = self.dropout1(_X)
         _X = fused_gelu(self.fc2(_X))
         X  = X + self.dropout2(_X)
-        '''
+
+        X  = self.final_norm(X)
         return X, attention_mask
 
 
@@ -185,24 +194,26 @@ class CrammingTransformer(nn.Module):
             ])
 
         self.classifier_head = nn.Sequential(
-                nn.LayerNorm(embed_dims),
-                nn.Linear(embed_dims, vocab_size, bias=has_bias)
-                #nn.Softmax(dim=-1)
+                nn.Linear(embed_dims, mlp_expansion_factor * embed_dims, bias=has_bias),
+                nn.LayerNorm(mlp_expansion_factor * embed_dims),
+                nn.ReLU(),
+                nn.Dropout1d(dropout_rate),
+                nn.Linear(mlp_expansion_factor * embed_dims, vocab_size, bias=has_bias)
             )
 
-        self.optimizer = optim.Adam(
+        self.optimizer = optim.AdamW(
                 self.parameters(), 
                 lr=lr, 
                 weight_decay=0.01, 
-                eps=1e-12,
+                eps=1e-6,
                 betas=(0.9, 0.98)
                 )
-        '''
-        self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        self.scheduler = optim.lr_scheduler.LinearLR(
                 self.optimizer, 
-                T_0=10000
+                start_factor=1e-6,
+                end_factor=1.0,
+                total_iters=1000
                 )
-        '''
 
         self.device = device
         self.to(self.device)

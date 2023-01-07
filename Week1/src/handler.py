@@ -44,7 +44,10 @@ class DataHandler:
         ## Concatenate dataset to be of max_length.
         self.condense_dataset()
 
-        self.tokenizer   = BertTokenizer.from_pretrained('bert-base-cased', cls_token='')
+        self.tokenizer   = BertTokenizer.from_pretrained(
+                'bert-base-cased', 
+                cls_token=''
+                )
         self.vocab_size  = len(self.tokenizer)
         self.device      = device
         self.dtype       = dtype
@@ -81,7 +84,7 @@ class DataHandler:
         dataloader = DataLoader(
                 dataset=TorchDatasetWrapper(self.text_data),
                 collate_fn=collate_fn,
-                shuffle=False,
+                shuffle=True,
                 batch_size=batch_size,
                 num_workers=num_workers,
                 pin_memory=pin_memory,
@@ -110,9 +113,10 @@ class CustomCollator:
         self.truncation     = truncation
         self.batch_size     = batch_size
 
-        self.pad_token_id   = self.tokenizer(['[PAD]'], add_special_tokens=False)['input_ids'][0][0]
-        self.mask_token_id  = self.tokenizer(['[MASK]'], add_special_tokens=False)['input_ids'][0][0]
-        self.sep_token_id   = self.tokenizer(['[SEP]'], add_special_tokens=False)['input_ids'][0][0]
+        self.pad_token_id    = self.tokenizer(['[PAD]'], add_special_tokens=False)['input_ids'][0][0]
+        self.mask_token_id   = self.tokenizer(['[MASK]'], add_special_tokens=False)['input_ids'][0][0]
+        self.sep_token_id    = self.tokenizer(['[SEP]'], add_special_tokens=False)['input_ids'][0][0]
+        self.unk_token_id    = self.tokenizer(['[UNK]'], add_special_tokens=False)['input_ids'][0][0]
 
 
     def __call__(self, batch) -> (T.tensor, T.tensor):
@@ -121,9 +125,9 @@ class CustomCollator:
         token_ids      = T.tensor(token_ids, dtype=T.long)
         attention_mask = T.tensor(attention_mask, dtype=T.long)
 
-        token_ids, attention_mask, original_labels, mask_idxs = self.mask_inputs(token_ids, attention_mask)
+        token_ids, attention_mask, original_labels = self.mask_inputs(token_ids, attention_mask)
 
-        return token_ids, attention_mask, original_labels, mask_idxs
+        return token_ids, attention_mask, original_labels
 
 
     def encode(self, batch: list) -> (list, list):
@@ -140,22 +144,19 @@ class CustomCollator:
 
 
     def mask_inputs(self, token_ids, attention_mask) -> (T.tensor, T.tensor, T.tensor, T.tensor):
-        original_ids    = token_ids.clone().flatten()
-        token_idxs      = T.arange(0, original_ids.shape[0])
+        original_ids = token_ids.clone().flatten()
 
-        '''
-        original_labels = T.zeros((token_ids.shape[0] * token_ids.shape[1], self.tokenizer.vocab_size))
-        original_labels[token_idxs, original_ids] = 1
-        '''
+        special_token_ids = [self.pad_token_id, self.sep_token_id, self.unk_token_id]
 
-        ## mask (i.e. (1, 0, 0, 1, ...)) where mask tokens (i.e. '[MASK]') are applied.
+        ## mask (i.e. (1, 0, 0, 1, ...)) where mask tokens (i.e. '[MASK]') 
+        ## are applied. Hence -> mask_mask
         mask_mask = T.zeros_like(attention_mask)
-        ##for idx, batch in enumerate(attention_mask):
         for idx, batch in enumerate(token_ids):
-            nonpad_idxs = T.argwhere(batch != self.sep_token_id).squeeze()
+            non_special_idxs = np.argwhere(np.isin(batch, special_token_ids) == 0).squeeze()
+
             mask_idxs = np.random.choice(
-                    nonpad_idxs, 
-                    size=int(nonpad_idxs.shape[0] * self.mlm_prob), 
+                    non_special_idxs,
+                    size=int(non_special_idxs.shape[0] * self.mlm_prob),
                     replace=False
                     )
             mask_mask[idx, mask_idxs] = 1
@@ -163,8 +164,8 @@ class CustomCollator:
 
         mask_idxs = T.argwhere(mask_mask.flatten() != 0).squeeze()
 
-        #original_ids[mask_idxs] = -100
-        return token_ids, attention_mask, original_ids[mask_idxs], mask_idxs 
+        original_ids[mask_idxs] = -100
+        return token_ids, attention_mask, original_ids
 
 
 
@@ -178,7 +179,7 @@ if __name__ == '__main__':
     handler = DataHandler(dataset_name='bookcorpus', subset_size=10000)
     dataloader = handler.get_dataloader(batch_size=32)
 
-    for idx, (X, attention_mask, y, mask_idxs) in enumerate(dataloader):
+    for idx, (X, attention_mask, y) in enumerate(dataloader):
         if idx == 1:
             break
 

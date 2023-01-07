@@ -2,6 +2,7 @@ import torch as T
 from torch.cuda.amp import GradScaler
 import numpy as np
 from tqdm import tqdm
+import pandas as pd
 import gc
 import sys
 from tokenizers import Tokenizer
@@ -65,40 +66,44 @@ def train(
 
     progress_bar = tqdm(total=len(dataloader) * n_epochs)
 
-    back_losses = []
+    losses = []
     for epoch in range(n_epochs):
-        for idx, (X, attention_mask, y, mask_idxs) in enumerate(dataloader):
+        for idx, (X, attention_mask, y) in enumerate(dataloader):
             X              = X.to(cramming_model.device)
-            attention_mask = attention_mask.to(cramming_model.device)
+            #attention_mask = attention_mask.to(cramming_model.device)
             y              = y.to(cramming_model.device)
-            mask_idxs      = mask_idxs.to(cramming_model.device)
 
             with T.cuda.amp.autocast():
-                out = cramming_model.forward(X, attention_mask)
-                out = out.flatten(start_dim=0, end_dim=-2)
-                out = out[mask_idxs]
+                out = cramming_model.forward(X, None)
+                #out = out.flatten(start_dim=0, end_dim=-2)
+                out = out.view(-1, handler.tokenizer.vocab_size)
                 
                 loss = loss_fn(out, y)
 
+            #print([(x.item(), y.item()) for x, y in zip(X[0], y[:128])])
+            #sys.exit()
 
             loss.backward()
 
             if idx % (batch_size // MICRO_BATCH_SIZE) == 0:
                 T.nn.utils.clip_grad_value_(cramming_model.parameters(), clip_value=0.5)
                 cramming_model.optimizer.step()
-                ##cramming_model.scheduler.step()
+                cramming_model.scheduler.step()
 
-                cramming_model.optimizer.zero_grad()
-                '''
+
+                if DEBUG:
+                    for param in cramming_model.parameters():
+                        # Make sure not 0 gradients.
+                        print(T.max(param.grad))
+
                 ## Zeroing grad like this is faster. (https://h-huang.github.io/tutorials/recipes/recipes/tuning_guide.html)
                 for param in cramming_model.parameters():
                     param.grad = None
-                '''
                 
-            back_losses.append(loss.item())
+            losses.append(loss.item())
 
-            if len(back_losses) == 500:
-                back_losses.pop(0)
+            if len(losses) == 500:
+                losses.pop(0)
 
             if idx % 1000 == 0:
                 print(f'Tokens ingested: {idx * 128 * MICRO_BATCH_SIZE // 1e6}M')
@@ -106,21 +111,17 @@ def train(
 
                 ## Prediction sample
                 if SHOW_PROGRESS:
+                    idxs = T.argwhere(y[:128] != -100).squeeze()
                     print(
-                            f'Original text:         {handler.tokenizer.decode(X.flatten()[:128])}\n\n', 
-                            f'Predicted Mask Tokens: {handler.tokenizer.decode(T.argmax(out[:128], dim=-1))}\n\n'
-                            f'Actual Mask text:      {handler.tokenizer.decode(y[:128])}\n\n',
-                            )
-                if DEBUG:
-                    print(
-                            f'Should be all mask:    {handler.tokenizer.decode(X.flatten()[mask_idxs])}\n\n'
-                            f'Actual Mask text:      {handler.tokenizer.decode(T.argmax(y[:128], dim=-1))}\n\n', 
-                            f'Output Tensor:         {out}\n\n'
+                            #f'Original Text (Masked):   {handler.tokenizer.decode(X.flatten()[:128])}\n\n', 
+                            #f'Predicted Text:           {handler.tokenizer.decode(T.argmax(out[:128], dim=-1))}\n\n',
+                            f'Original Masked Tokens:    {handler.tokenizer.decode(y[idxs])}\n\n',
+                            f'Predicted Masked Tokens:   {handler.tokenizer.decode(T.argmax(out[:128], dim=-1)[idxs])}\n\n'
                             )
 
 
             progress_bar.update(1)
-            progress_bar.set_description(f'Running Loss: {np.mean(back_losses[-100:])}')
+            progress_bar.set_description(f'Running Loss: {np.mean(losses[-100:])}')
 
 
 
