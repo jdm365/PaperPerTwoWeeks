@@ -85,9 +85,12 @@ def pretrain(
     progress_bar = tqdm(total=len(dataloader) * n_epochs)
 
     losses = []
+    best_loss = 1e12
     for epoch in range(n_epochs):
         for idx, (X, attention_mask, y) in enumerate(dataloader):
             X              = X.to(cramming_model.device)
+
+            ## Mask is None in fully packed token case.
             #attention_mask = attention_mask.to(cramming_model.device)
             y              = y.to(cramming_model.device)
 
@@ -120,22 +123,28 @@ def pretrain(
                 losses.pop(0)
 
             if idx % 5000 == 0:
-                print(f'Tokens ingested: {idx * 128 * MICRO_BATCH_SIZE // 1e6}M')
-                cramming_model.save_model(model_file=model_file)
 
-                ## Prediction sample
-                if SHOW_PROGRESS:
-                    idxs = T.argwhere(y[:128] != -100).squeeze()
-                    print(
-                            #f'Original Text (Masked):   {handler.tokenizer.decode(X.flatten()[:128])}\n\n', 
-                            #f'Predicted Text:           {handler.tokenizer.decode(T.argmax(out[:128], dim=-1))}\n\n',
-                            f'Original Masked Tokens:    {handler.tokenizer.decode(y[idxs])}\n\n',
-                            f'Predicted Masked Tokens:   {handler.tokenizer.decode(T.argmax(F.softmax(out[:128], dim=-1), dim=-1)[idxs])}\n\n'
-                            )
+                if np.isnan(np.mean(losses)):
+                    raise ValueError('Nan found in loss. Terminating.')
+
+                if np.mean(losses) < best_loss:
+                    best_loss = np.mean(best_loss)
+                    print(f'Tokens ingested: {idx * 128 * MICRO_BATCH_SIZE // 1e6}M')
+                    cramming_model.save_model(model_file=model_file)
+
+                    ## Prediction sample
+                    if SHOW_PROGRESS:
+                        idxs = T.argwhere(y[:128] != -100).squeeze()
+                        print(
+                                #f'Original Text (Masked):   {handler.tokenizer.decode(X.flatten()[:128])}\n\n', 
+                                #f'Predicted Text:           {handler.tokenizer.decode(T.argmax(out[:128], dim=-1))}\n\n',
+                                f'Original Masked Tokens:    {handler.tokenizer.decode(y[idxs])}\n\n',
+                                f'Predicted Masked Tokens:   {handler.tokenizer.decode(T.argmax(F.softmax(out[:128], dim=-1), dim=-1)[idxs])}\n\n'
+                                )
 
 
             progress_bar.update(1)
-            progress_bar.set_description(f'Running Loss: {np.mean(losses[-LOSS_RUNNING_MEAN_LENGTH:])}')
+            progress_bar.set_description(f'Running Loss: {np.mean(losses)}')
 
     
 def run_inference(

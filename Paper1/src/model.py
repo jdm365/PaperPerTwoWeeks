@@ -24,7 +24,7 @@ class InputEmbedding(nn.Module):
             ) -> None:
         super(InputEmbedding, self).__init__()
 
-        self.input_emb  = nn.Embedding(vocab_size, embed_dims)
+        self.input_emb  = nn.Embedding(vocab_size, embed_dims, max_norm=2)
         self.embed_norm = nn.LayerNorm(embed_dims)
 
         self.embed_dims = embed_dims
@@ -221,7 +221,7 @@ class CrammingTransformer(nn.Module):
 
     def forward(self, X: T.tensor, attention_mask: T.tensor = None) -> T.tensor:
         X = self.input_embedding(X)
-        for encoder_block in self.model:
+        for idx, encoder_block in enumerate(self.model):
             X, attention_mask = encoder_block(X, attention_mask)
         return self.classifier_head(X)
 
