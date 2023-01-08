@@ -34,22 +34,23 @@ class DataHandler:
             max_length=512, 
             subset_size=None,
             dtype=T.float16,
-            device=T.device('cuda:0' if T.cuda.is_available() else 'cpu')
+            device=T.device('cuda:0' if T.cuda.is_available() else 'cpu'),
+            eval=False
             ) -> None:
         ## Read data function
         self.text_data   = datasets.load_dataset(dataset_name, 'plain_text', split='train')['text']
         self.max_length  = max_length
         self.subset_size = subset_size
 
-        ## Concatenate dataset to be of max_length.
-        self.condense_dataset()
+        if not eval:
+            ## Concatenate dataset to be of max_length.
+            self.condense_dataset()
 
         self.tokenizer   = BertTokenizer.from_pretrained(
                 'bert-base-uncased', 
                 cls_token=''
                 )
         self.vocab_size  = len(self.tokenizer)
-        print(self.vocab_size)
         self.device      = device
         self.dtype       = dtype
 
