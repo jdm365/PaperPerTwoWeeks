@@ -24,7 +24,7 @@ class InputEmbedding(nn.Module):
             ) -> None:
         super(InputEmbedding, self).__init__()
 
-        self.input_emb  = nn.Embedding(vocab_size, embed_dims, max_norm=2)
+        self.input_emb  = nn.Embedding(vocab_size, embed_dims)
         self.embed_norm = nn.LayerNorm(embed_dims)
 
         self.embed_dims = embed_dims

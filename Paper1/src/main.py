@@ -79,7 +79,10 @@ def pretrain(
                 device=device
                 )
         if CONTINUE_FROM_CHECKPOINT:
-            cramming_model.load_model(model_file=model_file)
+            try:
+                cramming_model.load_model(model_file=model_file)
+            except FileNotFoundError:
+                print(f'No model by the name of {model_file} was found. Training from scratch.')
 
 
     progress_bar = tqdm(total=len(dataloader) * n_epochs)
@@ -99,7 +102,6 @@ def pretrain(
                 out = out.view(-1, handler.tokenizer.vocab_size)
                 
                 loss = loss_fn(out, y)
-
 
             loss.backward()
 
