@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import sys
+from tqdm import tqdm
 from handler import Handler
 
 
@@ -12,110 +13,106 @@ class RCGNLayer(nn.Module):
             self, 
             input_dims: int, 
             output_dims: int, 
-            adj_matrix: T.tensor,
-            edges: T.tensor
+            adj_matrix: T.tensor = None,
+            adj_tensor: T.sparse_coo_tensor = None
             ) -> None:
         super(RCGNLayer, self).__init__()
         '''
-        edges - edge triples of type (src, dst, rel_type). dims -> (3, n_edges)
+        input_dims  - input_dims
+        output_dims - output_dims
+        adj_matrix  - adjacency matrix with integer relationship ids
+        adj_tensor  - sparse tensor with stacked adjacency matrices for
+                      each relationship type.
         '''
         self.input_dims  = input_dims
         self.output_dims = output_dims
-        self.n_nodes     = adj_matrix.shape[0] 
-        self.n_relations = int(T.max(edges[2]).item()) + 1
+
+        if adj_matrix is not None:
+            self.n_nodes     = adj_matrix.shape[-1]
+            self.n_relations = int(T.max(adj_matrix).item()) + 1
+        else:
+            self.n_nodes     = adj_tensor.shape[-1]
+            self.n_relations = adj_tensor.shape[0]
+
         self.adj_matrix  = adj_matrix
-        self.edges       = edges
+        self.adj_tensor  = adj_tensor
 
         ## Concat weight matrices of different relations
         self.W                 = nn.Parameter(T.empty(size=(self.n_relations, input_dims, output_dims)))
         self.W0                = nn.Parameter(T.empty((input_dims, output_dims)))
-        self.inv_norm_constant = nn.Parameter(T.ones((self.n_nodes, self.n_relations)))
+        self.inv_norm_constant = nn.Parameter(T.ones((self.n_relations, self.n_nodes)))
 
         nn.init.xavier_uniform_(self.W)
         nn.init.xavier_uniform_(self.W0)
 
 
-
     def forward(self, X: T.tensor) -> T.tensor:
         '''
-        X - hidden states of all nodes incoming. dims -> (batch_size, n_nodes, self.input_dims)
+        X - hidden states of all nodes incoming. dims -> (n_nodes, self.input_dims)
         '''
-        ## TODO: Fix so no tensor creation in forward pass.
-        output_hidden_states = T.zeros_like(X, requires_grad=True)
-        for idx in range(self.n_nodes):
-            output_hidden_states[:, self.edges[1, idx]] += self.pass_message(
-                    X=X, 
-                    src_idx=self.edges[0, idx], 
-                    dst_idx=self.edges[1, idx], 
-                    rel_idx=self.edges[2, idx]
-                    )
-        output_hidden_states += self.add_self_connections(X, output_hidden_states)
-        return output_hidden_states
 
+        vals = []
+        
+        if self.adj_matrix is None:
+            for rel_idx in tqdm(range(self.n_relations)):
+                rel_adj_matrix = self.adj_tensor[rel_idx]
+                val = T.sparse.mm(rel_adj_matrix, X @ self.W[rel_idx])
+                val *= self.inv_norm_constant[rel_idx].unsqueeze(-1)
+                vals.append(val)
 
+            incoming_messages = sum(vals)
+            self_connection   = T.sparse.mm(X, self.W0)
+        else:
+            for rel_idx in range(self.n_relations):
+                rel_adj_matrix = T.where(self.adj_matrix == rel_idx, 1, 0)
+                val = rel_adj_matrix @ X @ self.W[rel_idx]
+                val *= self.inv_norm_constant[rel_idx]
 
-    def pass_message(
-            self, 
-            X: T.tensor, 
-            src_idx: T.tensor, 
-            dst_idx: T.tensor, 
-            rel_idx: T.tensor
-            ) -> T.tensor:
-        '''
-        X        - hidden states of all nodes incoming. dims -> (batch_size, n_nodes, self.input_dims)
-        src_idx  - source node indices.
-        dst_idx  - destination node indices.
-        rel_idx  - relationship type indices.
-        output_hidden_states - forward propogated hidden states of all nodes. dims -> (batch_size, n_nodes, self.input_dims)
-        '''
-        incoming_aggregated_state = X[:, src_idx] @ self.W[rel_idx]    ## dims -> (batch_size, output_dims)
-        incoming_aggregated_state = self.inv_norm_constant[dst_idx, rel_idx]
+            incoming_messages = T.sum(vals)
+            self_connection   = X @ self.W0
 
-        return incoming_aggregated_state 
+        return incoming_messages + self_connection
 
-
-
-    def add_self_connections(self, X: T.tensor, output_hidden_states: T.tensor) -> None:
-        '''
-        X - hidden states of all nodes. dims -> (batch_size, n_nodes, self.input_dims)
-        output_hidden_states - forward propogated hidden states of all nodes. dims -> (n_nodes, self.input_dims)
-        '''
-        return X @ self.W0 
 
 
 
 class RGCN(nn.Module):
     def __init__(
             self, 
-            adj_matrix: T.tensor,
-            edges: T.tensor,
-            output_dims: int = 2,   ## 2 for link prediction. 
-            hidden_dims: int = 16
+            adj_matrix: T.tensor = None,
+            adj_tensor: T.tensor = None,
+            output_dims: int = 16,
+            hidden_dims: int = 16,
+            dtype: T.dtype = T.float32
             ) -> None:
         super(RGCN, self).__init__()
-        ## input_dims -> n_nodes; one-hot encoded.
-        n_nodes     = adj_matrix.shape[0]
-        n_relations = edges.shape[-1]
+        ## input_dims first layer -> n_nodes; one-hot encoded.
+
+        if adj_matrix is not None:
+            n_nodes = adj_matrix.shape[-1]
+        else:
+            n_nodes = adj_tensor.shape[-1]
+
+        self.dtype = dtype
 
         self.network = nn.Sequential(
-                RCGNLayer(n_nodes, hidden_dims, adj_matrix, edges),
+                RCGNLayer(n_nodes, hidden_dims, adj_matrix, adj_tensor),
                 nn.ReLU(),
-                RCGNLayer(hidden_dims, output_dims, adj_matrix, edges),
-                nn.Softmax(dim=-1)
+                RCGNLayer(hidden_dims, output_dims, adj_matrix, adj_tensor)
                 )
 
 
     def forward(self, X: T.tensor) -> T.tensor:
-        if len(X.shape) == 2:
-            ## Add batch dimension if needed.
-            X = X.unsqueeze(dim=0)
-
+        if X.type != self.dtype:
+            X = X.type(self.dtype)
+            return self.network(X)
         return self.network(X)
 
 
 
-
-
+class DistMult:
+    def __init__(self):
+        return
 
 
 
@@ -124,7 +121,10 @@ if __name__ == '__main__':
     ####         TESTING          ####
     ##################################
 
-    handler = Handler()
-    model   = RGCN(handler.train_adjacency_matrix, handler.train_graph)
-    X       = T.diag(T.ones(handler.train_adjacency_matrix.shape[0]))
+    handler = Handler(get_negative_examples=True)
+    model   = RGCN(
+            adj_matrix=None,
+            adj_tensor=handler.train_adjacency_tensor
+            )
+    X       = T.diag(T.ones(handler.train_adjacency_matrix.shape[0])).type(T.long)
     print(model.forward(X))
