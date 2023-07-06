@@ -1,14 +1,8 @@
 import torch as T
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler
 import numpy as np
 from tqdm import tqdm
-import pandas as pd
-import gc
 import sys
-from tokenizers import Tokenizer
-from tokenizers.models import WordPiece
-from torch.utils.data import Dataset, DataLoader
 from handler import DataHandler 
 from model import *
 from test_model import HuggingFaceBertWrapper
@@ -20,7 +14,8 @@ TEST_WITH_HUGGING_FACE_MODEL = False
 LOSS_RUNNING_MEAN_LENGTH     = 500
 SHOW_PROGRESS                = True
 DEBUG                        = False 
-MICRO_BATCH_SIZE             = 32
+MICRO_BATCH_SIZE             = 4
+
 
 def pretrain(
         n_epochs=1,
@@ -81,6 +76,7 @@ def pretrain(
         if CONTINUE_FROM_CHECKPOINT:
             try:
                 cramming_model.load_model(model_file=model_file)
+                pass
             except FileNotFoundError:
                 print(f'No model by the name of {model_file} was found. Training from scratch.')
 
@@ -106,6 +102,8 @@ def pretrain(
             loss.backward()
 
             if idx % (batch_size // MICRO_BATCH_SIZE) == 0:
+                ##Normalize then clip gradients for SGD.
+                T.nn.utils.clip_grad_norm_(cramming_model.parameters(), max_norm=1.0)
                 T.nn.utils.clip_grad_value_(cramming_model.parameters(), clip_value=0.5)
                 cramming_model.optimizer.step()
                 cramming_model.scheduler.step()
@@ -147,6 +145,7 @@ def pretrain(
 
             progress_bar.update(1)
             progress_bar.set_description(f'Running Loss: {np.mean(losses)}')
+
 
     
 def run_inference(
@@ -224,5 +223,7 @@ def run_inference(
 
 
 if __name__ == '__main__':
-    pretrain(**train_configs['bert_base'])
-    #run_inference(**train_configs['bert_base'])
+    CONFIG_NAME = 'bert_test'
+
+    pretrain(**train_configs[CONFIG_NAME])
+    #run_inference(**train_configs[CONFIG_NAME])

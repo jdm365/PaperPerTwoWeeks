@@ -2,7 +2,12 @@ import torch as T
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.utils.checkpoint import checkpoint
 import math
+
+from flash_attn.flash_attention import FlashMHA
+import bitsandbytes as bnb
+
 
 @T.jit.script
 def fused_gelu(x):
@@ -121,6 +126,16 @@ class Encoder(nn.Module):
                 has_bias=has_bias,
                 dropout_rate=dropout_rate
                 )
+        """
+        self.attention_block = FlashMHA(
+                embed_dim=embed_dims,
+                num_heads=num_heads,
+                device=T.device('cuda:0' if T.cuda.is_available() else 'cpu'),
+                dtype=T.float16
+                )
+        ## Add to state dict
+        self.add_module("attention_block", self.attention_block)
+        """
 
         self.mlp_norm = nn.LayerNorm(embed_dims)
 
@@ -131,6 +146,7 @@ class Encoder(nn.Module):
 
         ## Skeptical
         self.final_norm = nn.LayerNorm(embed_dims)
+
         
 
     def forward(self, X: T.tensor, attention_mask: T.tensor = None) -> (T.tensor, T.tensor):
@@ -147,7 +163,8 @@ class Encoder(nn.Module):
         ## Pre-norm
         _X = self.attention_norm(X)
 
-        X  = X + self.attention_block(_X, attention_mask)
+        #X  = X + self.attention_block(_X, attention_mask)
+        X  = X + self.attention_block(_X)[0]
         
         _X = self.mlp_norm(X)
 
@@ -156,7 +173,9 @@ class Encoder(nn.Module):
         _X = fused_gelu(self.fc2(_X))
         X  = X + self.dropout2(_X)
 
-        X  = self.final_norm(X)
+        ## X  = self.final_norm(X)
+        X  = checkpoint(self.final_norm, X)
+
         return X, attention_mask
 
 
@@ -201,6 +220,7 @@ class CrammingTransformer(nn.Module):
                 nn.Linear(mlp_expansion_factor * embed_dims, vocab_size, bias=has_bias)
             )
 
+        '''
         self.optimizer = optim.AdamW(
                 self.parameters(), 
                 lr=lr, 
@@ -208,11 +228,19 @@ class CrammingTransformer(nn.Module):
                 eps=1e-6,
                 betas=(0.9, 0.98)
                 )
+        '''
+        self.optimizer = bnb.optim.Adam8bit(
+                self.parameters(),
+                lr=lr,
+                eps=1e-3,
+                betas=(0.9, 0.98)
+                )
+
         self.scheduler = optim.lr_scheduler.LinearLR(
                 self.optimizer, 
                 start_factor=1e-6,
                 end_factor=1.0,
-                total_iters=1000
+                total_iters=200
                 )
 
         self.device = device
